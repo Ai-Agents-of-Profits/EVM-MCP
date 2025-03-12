@@ -946,7 +946,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // Step 2: Deposit funds using depositFor as per protocol spec
           const result = await protocol.depositFunds(
             token, 
-            amount, 
+            String(amount), // Convert amount to string to ensure correct type
             true, // willLend = true for lending deposit
             fromAddress,
             network

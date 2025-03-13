@@ -2,9 +2,10 @@
 import { ethers } from 'ethers';
 import * as fs from 'fs-extra';
 import * as path from 'path';
-import { getETokenAddress, getPTokenAddress, getBalanceContractAddress, getExplorerUrl, getTokenAddress, TokenSymbol, ContractType, TOKEN_ADDRESSES } from './constants.js';
+import { getETokenAddress, getPTokenAddress, getBalanceContractAddress, getExplorerUrl, getTokenAddress, getUniversalBalanceAddress, TokenSymbol, ContractType, TOKEN_ADDRESSES } from './constants.js';
 import * as ethereum from './ethereum.js';
 import config from './config.js';
+import transactionQueue from './transaction-queue.js';
 
 // Type declaration for fs-extra
 declare module 'fs-extra' {
@@ -73,6 +74,7 @@ const UniversalBalanceABI = [
   "function deposit(uint256 amount, bool willLend)",
   "function depositFor(uint256 amount, bool lendingDeposit, address account)",
   "function withdrawFor(uint256 amount, bool lendingRedemption, address recipient, address account)",
+  "function withdraw(uint256 amount, bool forceLentRedemption, address recipient) returns (uint256 amountWithdrawn, bool lendingBalanceUsed)",
   "function setDelegateApproval(address delegate, bool isApproved)",
   "function userBalances(address user) view returns (uint256 sittingBalance, uint256 lentBalance)"
 ];
@@ -174,20 +176,74 @@ export async function depositFunds(
   willLend: boolean,
   fromAddress: string,
   network: string = config.infura.defaultNetwork
-): Promise<{hash: string; explorer: string}> {
-  const contract = await getUniversalBalanceContract(symbol, fromAddress, network);
+): Promise<{hash: string; explorer: string; transactionId: string}> {
+  // Create a transaction record first to track this transaction
+  const transactionId = transactionQueue.createTransaction('deposit', {
+    symbol, amount, willLend, fromAddress, network
+  });
   
-  // Convert amount to proper format (wei)
-  const decimals = symbol === 'USDC' ? 6 : 18; // Use 6 decimals for USDC, 18 for other tokens
-  const formattedAmount = ethers.parseUnits(amount, decimals);
-
-  // Call deposit function (using the function signature from the ABI)
-  const tx = await contract.deposit(formattedAmount, willLend);
-  await tx.wait();
+  // Start the transaction process in the background immediately
+  setTimeout(async () => {
+    try {
+      const contract = await getUniversalBalanceContract(symbol, fromAddress, network);
+      
+      // Convert amount to proper format (wei)
+      const decimals = symbol === 'USDC' ? 6 : 18; // Use 6 decimals for USDC, 18 for other tokens
+      const formattedAmount = ethers.parseUnits(amount, decimals);
+    
+      // Set up transaction with explicit gas limit to avoid timeouts
+      const options = {
+        gasLimit: 500000, // Explicit gas limit
+      };
+      
+      console.log(`Depositing ${amount} ${symbol} from address ${fromAddress}`);
+      console.log(`Using decimals: ${decimals}, formatted amount: ${formattedAmount.toString()}, willLend: ${willLend}`);
+      
+      // Call deposit function with options
+      const tx = await contract.deposit(formattedAmount, willLend, options);
+      console.log(`Transaction initiated with hash: ${tx.hash}`);
+      
+      // Update transaction record with hash
+      transactionQueue.setTransactionHash(transactionId, tx.hash);
+      
+      // Continue processing in the background
+      try {
+        // Wait for transaction confirmation
+        const receipt = await tx.wait(1);
+        console.log(`Transaction confirmed: ${tx.hash}`);
+        
+        const result = {
+          hash: tx.hash,
+          explorer: getExplorerUrl(network, tx.hash)
+        };
+        
+        console.log('Deposit successful:', result);
+        
+        // Mark transaction as confirmed
+        transactionQueue.confirmTransaction(transactionId, {
+          ...result,
+          amount,
+          symbol,
+          willLend,
+          timestamp: new Date().toISOString()
+        });
+      } catch (error) {
+        console.error('Error during deposit confirmation:', error);
+        // Mark transaction as failed
+        transactionQueue.failTransaction(transactionId, error);
+      }
+    } catch (error) {
+      console.error('Error initiating deposit transaction:', error);
+      // Mark transaction as failed
+      transactionQueue.failTransaction(transactionId, error);
+    }
+  }, 0);
   
+  // Return immediately with transaction ID
   return {
-    hash: tx.hash,
-    explorer: getExplorerUrl(network, tx.hash)
+    hash: 'pending', // Will be updated in the transaction queue once available
+    explorer: '',
+    transactionId
   };
 }
 
@@ -208,37 +264,93 @@ export async function withdrawFunds(
   recipientAddress: string,
   fromAddress: string,
   network: string = config.infura.defaultNetwork
-): Promise<{hash: string; explorer: string; amountWithdrawn: string; lendingBalanceUsed: boolean}> {
-  const contract = await getUniversalBalanceContract(symbol, fromAddress, network);
+): Promise<{hash: string; explorer: string; amountWithdrawn: string; lendingBalanceUsed: boolean; transactionId: string}> {
+  // Create a transaction record first to track this transaction
+  const transactionId = transactionQueue.createTransaction('withdraw', {
+    symbol, amount, forceLentRedemption, recipientAddress, fromAddress, network
+  });
   
-  // Convert amount to proper format (wei)
-  const formattedAmount = ethers.parseUnits(amount, 18); // Assuming 18 decimals
-  
-  // Call withdraw function directly
-  const tx = await contract.withdraw(formattedAmount, forceLentRedemption, recipientAddress);
-  const receipt = await tx.wait();
-  
-  // Extract return values from event logs if possible
-  let amountWithdrawn = amount;
-  let lendingBalanceUsed = forceLentRedemption;
-  
-  try {
-    // Attempt to parse event logs to get actual return values
-    // This would need to be customized based on the actual events emitted
-    const withdrawalEvent = receipt.events?.find(e => e.event === 'Withdrawal');
-    if (withdrawalEvent && withdrawalEvent.args) {
-      amountWithdrawn = ethers.formatUnits(withdrawalEvent.args.amountWithdrawn || formattedAmount, 18);
-      lendingBalanceUsed = withdrawalEvent.args.lendingBalanceUsed || forceLentRedemption;
+  // Start the transaction process in the background immediately
+  setTimeout(async () => {
+    try {
+      const contract = await getUniversalBalanceContract(symbol, fromAddress, network);
+      
+      // Convert amount to proper format using the correct decimals for the token
+      const decimals = symbol === 'USDC' ? 6 : 18; // Use 6 decimals for USDC, 18 for other tokens
+      const formattedAmount = ethers.parseUnits(amount, decimals);
+      
+      // Set up transaction with explicit gas limit to avoid timeouts
+      const options = {
+        gasLimit: 500000, // Explicit gas limit
+      };
+      
+      console.log(`Withdrawing ${amount} ${symbol} from address ${fromAddress} to ${recipientAddress}`);
+      console.log(`Using decimals: ${decimals}, formatted amount: ${formattedAmount.toString()}`);
+      
+      // Call withdraw function with options
+      const tx = await contract.withdraw(formattedAmount, forceLentRedemption, recipientAddress, options);
+      console.log(`Transaction initiated with hash: ${tx.hash}`);
+      
+      // Update transaction record with hash
+      transactionQueue.setTransactionHash(transactionId, tx.hash);
+      
+      // Continue processing in the background
+      try {
+        // Wait for transaction confirmation
+        const receipt = await tx.wait(1);
+        console.log(`Transaction confirmed: ${tx.hash}`);
+        
+        // Extract return values from event logs if possible
+        let amountWithdrawn = amount;
+        let lendingBalanceUsed = forceLentRedemption;
+        
+        try {
+          // Attempt to parse event logs to get actual return values
+          const withdrawalEvent = receipt.events?.find(e => e.event === 'Withdrawal');
+          if (withdrawalEvent && withdrawalEvent.args) {
+            amountWithdrawn = ethers.formatUnits(withdrawalEvent.args.amountWithdrawn || formattedAmount, decimals);
+            lendingBalanceUsed = withdrawalEvent.args.lendingBalanceUsed || forceLentRedemption;
+          }
+        } catch (error) {
+          console.warn('Could not parse withdrawal event data', error);
+        }
+        
+        const result = {
+          hash: tx.hash,
+          explorer: getExplorerUrl(network, tx.hash),
+          amountWithdrawn,
+          lendingBalanceUsed
+        };
+        
+        console.log('Withdrawal successful:', result);
+        
+        // Mark transaction as confirmed
+        transactionQueue.confirmTransaction(transactionId, {
+          ...result,
+          amount,
+          symbol,
+          recipientAddress,
+          timestamp: new Date().toISOString()
+        });
+      } catch (error) {
+        console.error('Error during withdrawal confirmation:', error);
+        // Mark transaction as failed
+        transactionQueue.failTransaction(transactionId, error);
+      }
+    } catch (error) {
+      console.error('Error initiating withdrawal transaction:', error);
+      // Mark transaction as failed
+      transactionQueue.failTransaction(transactionId, error);
     }
-  } catch (error) {
-    console.warn('Could not parse withdrawal event data', error);
-  }
+  }, 0);
   
+  // Return immediately with transaction ID
   return {
-    hash: tx.hash,
-    explorer: getExplorerUrl(network, tx.hash),
-    amountWithdrawn,
-    lendingBalanceUsed
+    hash: 'pending', // Will be updated in the transaction queue once available
+    explorer: '',
+    amountWithdrawn: amount, // Initial estimate
+    lendingBalanceUsed: forceLentRedemption,
+    transactionId
   };
 }
 
@@ -477,34 +589,176 @@ export async function getMarketLiquidity(
 }
 
 /**
- * Get collateral balance for a user
+ * Get market liquidity for a token asynchronously
  * @param symbol Token symbol
- * @param userAddress User address
  * @param network Network to connect to
- * @returns Collateral balance information
+ * @returns Object with taskId and initial status
  */
-export async function getCollateralBalance(
+export async function getMarketLiquidityAsync(
   symbol: string | TokenSymbol,
-  userAddress: string,
   network: string = config.infura.defaultNetwork
-): Promise<any> {
-  // Use a read-only provider since we don't need to sign transactions
-  const provider = ethereum.getProvider(network);
-  const address = getPTokenAddress(symbol as TokenSymbol);
-  const abi = await loadAbi('PTokenABI');
-  const contract = new ethers.Contract(address, abi, provider);
-  
-  // Get balances
-  const tokenBalance = await contract.balanceOf(userAddress);
-  const underlyingBalance = await contract.balanceOfUnderlying(userAddress);
-  
-  // Use ethers v6 format (no utils namespace)
-  return {
-    token: symbol,
-    tokenBalance: ethers.formatUnits(tokenBalance, 18), 
-    underlyingBalance: ethers.formatUnits(underlyingBalance, 18), 
-    isCollateral: true // Assuming all PTokens are used as collateral
-  };
+): Promise<{
+  taskId: string;
+  status: string;
+  partial?: {
+    message: string;
+    progress: number;
+  }
+}> {
+  try {
+    // Create a unique task ID
+    const taskId = `liquidity-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    
+    // Start the analysis in the background
+    processMarketLiquidityTask(taskId, symbol, network);
+    
+    // Return immediately with the task ID
+    return {
+      taskId,
+      status: 'pending',
+      partial: {
+        message: 'Market liquidity analysis started',
+        progress: 0
+      }
+    };
+  } catch (error) {
+    console.error(`Error starting market liquidity analysis for ${symbol}:`, error);
+    throw new Error(`Failed to start market liquidity analysis: ${(error as Error).message}`);
+  }
+}
+
+/**
+ * Process the market liquidity task in the background
+ * @param taskId Task ID
+ * @param symbol Token symbol
+ * @param network Network to connect to
+ */
+async function processMarketLiquidityTask(
+  taskId: string,
+  symbol: string | TokenSymbol,
+  network: string
+): Promise<void> {
+  try {
+    // Update task status to processing
+    transactionQueue.updateTaskStatus(taskId, {
+      status: "processing",
+      message: "Retrieving market liquidity data...",
+      progress: 10,
+      result: null
+    });
+
+    // Extract the base token symbol if a full token key was provided
+    let baseSymbol = symbol;
+    if (typeof symbol === 'string' && symbol.includes('-')) {
+      baseSymbol = symbol.split('-')[1] as TokenSymbol;
+    }
+    
+    // Update progress
+    transactionQueue.updateTaskStatus(taskId, {
+      status: "processing",
+      message: `Processing token ${baseSymbol}...`,
+      progress: 30,
+      result: null
+    });
+    
+    // Check if EToken exists for this symbol
+    let address;
+    try {
+      address = getETokenAddress(baseSymbol as TokenSymbol);
+    } catch (error) {
+      // If EToken doesn't exist, return default values
+      console.log(`No EToken found for ${baseSymbol}, returning default liquidity values`);
+      
+      const defaultResult = {
+        token: baseSymbol,
+        totalBorrows: "0",
+        totalSupply: "0",
+        availableLiquidity: "0",
+        utilization: "0%"
+      };
+
+      // Complete the task
+      transactionQueue.updateTaskStatus(taskId, {
+        status: "completed",
+        message: "Market liquidity analysis completed",
+        progress: 100,
+        result: defaultResult
+      });
+      
+      return;
+    }
+    
+    // Update progress
+    transactionQueue.updateTaskStatus(taskId, {
+      status: "processing",
+      message: "Connecting to contract...",
+      progress: 50,
+      result: null
+    });
+    
+    // Use a read-only provider since we don't need to sign transactions
+    const provider = await ethereum.getProvider(network);
+    const abi = await loadAbi('ETokenABI');
+    const contract = new ethers.Contract(address, abi, provider);
+    
+    // Update progress
+    transactionQueue.updateTaskStatus(taskId, {
+      status: "processing",
+      message: "Fetching contract data...",
+      progress: 70,
+      result: null
+    });
+    
+    // Get liquidity info using only totalBorrows and totalSupply
+    const totalBorrows = await contract.totalBorrows();
+    const totalSupply = await contract.totalSupply();
+    
+    // Convert values to strings
+    const totalBorrowsStr = totalBorrows.toString();
+    const totalSupplyStr = totalSupply.toString();
+    
+    // Calculate available liquidity and utilization using regular math
+    // (converting from strings to numbers)
+    const totalBorrowsNum = parseFloat(totalBorrowsStr);
+    const totalSupplyNum = parseFloat(totalSupplyStr);
+    const availableLiquidity = Math.max(0, totalSupplyNum - totalBorrowsNum);
+    const utilization = totalSupplyNum > 0 ? (totalBorrowsNum * 100 / totalSupplyNum) : 0;
+    
+    const result = {
+      token: baseSymbol,
+      totalBorrows: totalBorrowsStr,
+      totalSupply: totalSupplyStr,
+      availableLiquidity: availableLiquidity.toString(),
+      utilization: utilization.toFixed(2) + '%'
+    };
+    
+    // Complete the task
+    transactionQueue.updateTaskStatus(taskId, {
+      status: "completed",
+      message: "Market liquidity analysis completed",
+      progress: 100,
+      result
+    });
+    
+  } catch (error) {
+    console.error(`Error processing market liquidity task for ${symbol}:`, error);
+    // Update task status to failed
+    transactionQueue.updateTaskStatus(taskId, {
+      status: "failed",
+      message: `Error: ${(error as Error).message}`,
+      progress: 0,
+      result: null
+    });
+  }
+}
+
+/**
+ * Get market liquidity task status
+ * @param taskId Task ID
+ * @returns Task status
+ */
+export function getMarketLiquidityStatus(taskId: string): any {
+  return transactionQueue.getTaskStatus(taskId);
 }
 
 /**
@@ -625,12 +879,20 @@ export async function getUserPosition(
         try {
           // Only try to get collateral for tokens that have PTokens available
           if (token.symbol === 'USDC' || token.symbol === 'WBTC' || token.symbol === 'LUSD' || token.symbol === 'aprMON') {
-            const collateralData = await getCollateralBalance(token, userAddress, network);
-            const collateralBalance = collateralData.underlyingBalance;
+            // Get PToken contract directly instead of using removed getCollateralBalance
+            const pTokenContract = new ethers.Contract(
+              getPTokenAddress(token.symbol),
+              await loadAbi('PTokenABI'),
+              provider
+            );
+            
+            const tokenBalance = await pTokenContract.balanceOf(userAddress);
+            const underlyingBalance = await pTokenContract.balanceOfUnderlying(userAddress);
+            const collateralBalance = ethers.formatUnits(underlyingBalance, 18);
             
             result.collateral.push({
               token: token.symbol,
-              amount: collateralData.tokenBalance,
+              amount: ethers.formatUnits(tokenBalance, 18),
               amountUnderlying: collateralBalance
             });
             
@@ -669,6 +931,305 @@ export async function getUserPosition(
 }
 
 /**
+ * Get a complete summary of a user's position across all tokens asynchronously
+ * @param userAddress User address
+ * @param network Network to connect to
+ * @returns Object with taskId and initial status
+ */
+export async function getUserPositionAsync(
+  userAddress: string,
+  network: string = config.provider.defaultNetwork
+): Promise<{
+  taskId: string;
+  status: string;
+  partial?: {
+    message: string;
+    progress: number;
+  }
+}> {
+  try {
+    // Create a unique task ID
+    const taskId = `position-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    
+    // Start the position retrieval in the background
+    processUserPositionTask(taskId, userAddress, network);
+    
+    // Return immediately with the task ID
+    return {
+      taskId,
+      status: 'pending',
+      partial: {
+        message: 'User position analysis started',
+        progress: 0
+      }
+    };
+  } catch (error) {
+    console.error(`Error starting user position analysis for ${userAddress}:`, error);
+    throw new Error(`Failed to start user position analysis: ${(error as Error).message}`);
+  }
+}
+
+/**
+ * Process the user position task in the background
+ * @param taskId Task ID
+ * @param userAddress User address
+ * @param network Network to connect to
+ */
+async function processUserPositionTask(
+  taskId: string,
+  userAddress: string,
+  network: string
+): Promise<void> {
+  try {
+    // Update task status to processing
+    transactionQueue.updateTaskStatus(taskId, {
+      status: "processing",
+      message: "Retrieving user position data...",
+      progress: 10,
+      result: null
+    });
+
+    // Get Universal Balance contract (which tracks all tokens for a user)
+    const provider = await ethereum.getProvider(network);
+    
+    // Define the tokens we want to check
+    const tokens: { symbol: string, universalBalance?: string }[] = [
+      { symbol: 'SWETH' },
+      { symbol: 'USDC', universalBalance: TOKEN_ADDRESSES['usdcUniBalance'] },
+      { symbol: 'WBTC' },
+      { symbol: 'aUSD' },
+      { symbol: 'LUSD' },
+      { symbol: 'aprMON' },
+      { symbol: 'shMon', universalBalance: TOKEN_ADDRESSES['shMonUniBalance'] }
+    ];
+    
+    // Update progress
+    transactionQueue.updateTaskStatus(taskId, {
+      status: "processing",
+      message: "Fetching balances from Universal Balance contract...",
+      progress: 30,
+      result: null
+    });
+    
+    // Get balances from Universal Balance for tokens with universalBalance address
+    const collateralBalances: { [token: string]: string } = {};
+    const borrowBalances: { [token: string]: string } = {};
+    let totalCollateralUsd = 0;
+    let totalBorrowedUsd = 0;
+    
+    // Process each token and get its balances
+    for (const token of tokens) {
+      if (token.universalBalance) {
+        try {
+          const universalBalanceAbi = await loadAbi('UniversalBalanceABI');
+          const universalBalanceContract = new ethers.Contract(
+            token.universalBalance,
+            universalBalanceAbi,
+            provider
+          );
+          
+          // Call userBalances function as required by specifications
+          const balances = await universalBalanceContract.userBalances(userAddress);
+          
+          // Use correct decimal formatting based on token type
+          const decimals = token.symbol === 'USDC' ? 6 : 18;
+          const sittingBalance = ethers.formatUnits(balances.sittingBalance, decimals);
+          const lentBalance = ethers.formatUnits(balances.lentBalance, decimals);
+          const totalBalance = parseFloat(sittingBalance) + parseFloat(lentBalance);
+          
+          if (totalBalance > 0) {
+            collateralBalances[token.symbol] = totalBalance.toString();
+            
+            // Get token price and calculate USD value
+            const price = await getPriceForToken(token.symbol, network);
+            const collateralUsd = totalBalance * parseFloat(price);
+            totalCollateralUsd += collateralUsd;
+          }
+        } catch (error) {
+          console.log(`Error getting UniversalBalance for ${token.symbol}: ${error.message}`);
+        }
+      }
+      
+      // Check if token has a borrowable/debt version
+      try {
+        // Get PToken contract for the token (borrowable version)
+        const pTokenContract = new ethers.Contract(
+          getPTokenAddress(token.symbol),
+          await loadAbi('PTokenABI'),
+          provider
+        );
+        
+        const borrowed = await pTokenContract.borrowBalanceStored(userAddress);
+        if (borrowed.gt(0)) {
+          // Use correct decimal formatting based on token type
+          const decimals = token.symbol === 'USDC' ? 6 : 18;
+          const borrowedAmount = ethers.formatUnits(borrowed, decimals);
+          
+          borrowBalances[token.symbol] = borrowedAmount;
+          
+          // Get token price and calculate USD value
+          const price = await getPriceForToken(token.symbol, network);
+          const borrowedUsd = parseFloat(borrowedAmount) * parseFloat(price);
+          totalBorrowedUsd += borrowedUsd;
+        }
+      } catch (error) {
+        // This is normal if token doesn't have a debt version
+        console.log(`No debt token for ${token.symbol}: ${error.message}`);
+      }
+    }
+    
+    // Update progress
+    transactionQueue.updateTaskStatus(taskId, {
+      status: "processing",
+      message: "Processing balances...",
+      progress: 60,
+      result: null
+    });
+    
+    // Mock supply APY and borrow rates for demonstration
+    const supplyApy: { [key: string]: string } = {
+      'SWETH': '0.21',
+      'USDC': '0.27',
+      'WBTC': '2.92',
+      'aUSD': '0.48',
+      'LUSD': '0',
+      'aprMON': '0',
+      'shMon': '0'
+    };
+    
+    const borrowApr: { [key: string]: string } = {
+      'SWETH': '2.25',
+      'USDC': '2.30',
+      'WBTC': '3.94',
+      'aUSD': '2.50',
+      'LUSD': '0',
+      'aprMON': '0',
+      'shMon': '0'
+    };
+    
+    // Build position details by token
+    const positions = [];
+    let netWorthUsd = 0;
+    let averageApy = 0;
+    
+    // Update progress
+    transactionQueue.updateTaskStatus(taskId, {
+      status: "processing",
+      message: "Calculating positions by token...",
+      progress: 80,
+      result: null
+    });
+    
+    // Process each supported token - use predefined list instead of TokenSymbol object
+    const supportedTokens = ['SWETH', 'USDC', 'WBTC', 'aUSD', 'LUSD', 'aprMON', 'shMon'];
+    
+    for (const token of supportedTokens) {
+      if (collateralBalances[token] || borrowBalances[token]) {
+        // Get token price
+        const price = await getPriceForToken(token, network);
+        
+        // Calculate USD values
+        const collateralAmount = collateralBalances[token] || "0";
+        const borrowAmount = borrowBalances[token] || "0";
+        
+        const collateralUsd = parseFloat(collateralAmount) * parseFloat(price);
+        const borrowedUsd = parseFloat(borrowAmount) * parseFloat(price);
+        
+        netWorthUsd += collateralUsd - borrowedUsd;
+        
+        // Only add if there's a balance
+        if (parseFloat(collateralAmount) > 0 || parseFloat(borrowAmount) > 0) {
+          positions.push({
+            symbol: token,
+            collateralBalance: (parseFloat(collateralAmount) + parseFloat(borrowAmount)).toString(),
+            collateralBalanceUsd: (collateralUsd + borrowedUsd).toString(),
+            borrowBalance: borrowAmount,
+            borrowBalanceUsd: borrowedUsd.toString(),
+            utilization: parseFloat(collateralAmount) > 0 && parseFloat(borrowAmount) > 0
+              ? `${((parseFloat(borrowAmount) / parseFloat(collateralAmount)) * 100).toFixed(2)}%`
+              : "0%"
+          });
+        }
+      }
+    }
+    
+    // Update progress
+    transactionQueue.updateTaskStatus(taskId, {
+      status: "processing",
+      message: "Calculating metrics and strategies...",
+      progress: 85,
+      result: null
+    });
+    
+    // Use health factor from user position if available, or calculate it
+    let healthFactor;
+    if (totalBorrowedUsd > 0 && totalCollateralUsd > 0) {
+      healthFactor = ((totalCollateralUsd * 0.75) / totalBorrowedUsd).toString();
+    } else if (totalCollateralUsd > 0) {
+      healthFactor = "∞"; // No borrows, so no liquidation risk
+    } else {
+      healthFactor = null; // No collateral, so health factor is undefined
+    }
+    
+    // Calculate average APY from supply rates weighted by collateral balances
+    let weightedApySum = 0;
+    let totalCollateralWeight = 0;
+    
+    for (const position of positions) {
+      const collateralValue = parseFloat(position.collateralBalance);
+      if (collateralValue > 0) {
+        const tokenApy = parseFloat(supplyApy[position.symbol] || "0");
+        const weight = parseFloat(position.collateralBalanceUsd);
+        weightedApySum += tokenApy * weight;
+        totalCollateralWeight += weight;
+      }
+    }
+    
+    averageApy = totalCollateralWeight > 0
+      ? (weightedApySum / totalCollateralWeight).toString()
+      : "0";
+    
+    // Assemble the final result
+    const result = {
+      address: userAddress,
+      healthFactor,
+      totalCollateralUsd: totalCollateralUsd.toString(),
+      totalBorrowedUsd: totalBorrowedUsd.toString(), 
+      netWorthUsd: netWorthUsd.toString(),
+      averageApy,
+      liquidationThreshold: "0.75", // Default value
+      positions
+    };
+    
+    // Mark task as completed with the final result
+    transactionQueue.updateTaskStatus(taskId, {
+      status: "completed",
+      message: "User position analysis completed",
+      progress: 100,
+      result
+    });
+  } catch (error) {
+    console.error("Error in user position analysis:", error);
+    // Mark task as failed
+    transactionQueue.updateTaskStatus(taskId, {
+      status: "failed",
+      message: `Analysis failed: ${(error as Error).message}`,
+      progress: 0,
+      result: null
+    });
+  }
+}
+
+/**
+ * Get the status of a user position task
+ * @param taskId Task ID to check
+ * @returns Current status of the user position analysis task
+ */
+export function getUserPositionStatus(taskId: string): any {
+  return transactionQueue.getTaskStatus(taskId);
+}
+
+/**
  * Repay borrowed funds to the lending protocol
  * @param symbol Token symbol
  * @param amount Amount to repay
@@ -699,91 +1260,6 @@ export async function repayBorrowed(
   } catch (error) {
     console.error(`Error repaying borrowed funds:`, error);
     throw new Error(`Failed to repay borrowed funds: ${(error as Error).message}`);
-  }
-}
-
-/**
- * Get lending balance for a user
- * @param symbol Token symbol
- * @param userAddress User address
- * @param network Network to connect to
- * @returns Lending balance information
- */
-export async function getLendingBalance(
-  symbol: string | TokenSymbol,
-  userAddress: string,
-  network: string = config.provider.defaultNetwork
-): Promise<{balance: string; balanceUsd: string}> {
-  try {
-    const contract = await getETokenContract(symbol, userAddress, network);
-    const provider = ethereum.getProvider(network);
-    
-    // Get balance in lending protocol
-    const balanceWei = await contract.balanceOf(userAddress);
-    const balance = ethers.formatUnits(balanceWei, 18); // Assuming 18 decimals
-    
-    // Get exchange rate to USD
-    const exchangeRate = await contract.exchangeRateCurrent();
-    const formattedExchangeRate = ethers.formatUnits(exchangeRate, 18);
-    
-    // Calculate USD value (simplified - would need price oracle in real implementation)
-    const balanceUsd = (parseFloat(balance) * parseFloat(formattedExchangeRate)).toString();
-    
-    return {
-      balance,
-      balanceUsd
-    };
-  } catch (error) {
-    console.error(`Error getting lending balance:`, error);
-    throw new Error(`Failed to get lending balance: ${(error as Error).message}`);
-  }
-}
-
-/**
- * Get borrow balance for a user
- * @param symbol Token symbol
- * @param userAddress User address
- * @param network Network to connect to
- * @returns Borrow balance information
- */
-export async function getBorrowBalance(
-  symbol: string | TokenSymbol,
-  userAddress: string,
-  network: string = config.provider.defaultNetwork
-): Promise<{borrowed: string; borrowedUsd: string; limit: string}> {
-  try {
-    const contract = await getETokenContract(symbol, userAddress, network);
-    
-    // Get borrowed amount - use borrowBalanceStored instead of borrowBalanceCurrent if needed
-    const borrowedWei = await contract.borrowBalanceStored(userAddress);
-    const borrowed = ethers.formatUnits(borrowedWei, 18); // Assuming 18 decimals
-    
-    // Get collateral factor if available
-    let formattedCollateralFactor = "0.75"; // Default value if not available
-    try {
-      const collateralFactor = await contract.collateralFactorMantissa();
-      formattedCollateralFactor = ethers.formatUnits(collateralFactor, 18);
-    } catch (error) {
-      console.warn("Could not get collateral factor, using default", error);
-    }
-    
-    // Get price in USD (simplified)
-    const priceInUsd = await getPriceForToken(symbol, network);
-    
-    // Calculate borrowed value in USD
-    const borrowedUsd = (parseFloat(borrowed) * parseFloat(priceInUsd)).toString();
-    
-    // Get borrow limit based on collateral
-    const limit = (parseFloat(borrowedUsd) / parseFloat(formattedCollateralFactor)).toString();
-    
-    return {
-      borrowed,
-      borrowedUsd,
-      limit
-    };
-  } catch (error) {
-    console.error(`Error getting borrow balance:`, error);
-    throw new Error(`Failed to get borrow balance: ${(error as Error).message}`);
   }
 }
 
@@ -824,217 +1300,195 @@ async function getPriceForToken(
 }
 
 /**
- * Analyze lending opportunities across supported tokens
- * @param network Network to connect to
- * @returns Analysis of lending opportunities
- */
-export async function analyzeLendingOpportunities(
-  network: string = config.provider.defaultNetwork
-): Promise<any> {
-  try {
-    // Array of supported token symbols
-    const supportedTokens = [
-      'SWETH', 'USDC', 'WBTC', 'aUSD', 'LUSD', 'aprMON'
-    ];
-    
-    const opportunities = [];
-    
-    // Analyze each token
-    for (const symbol of supportedTokens) {
-      try {
-        // For ETokens (lending)
-        if (['SWETH', 'USDC', 'WBTC', 'aUSD'].includes(symbol)) {
-          const address = getETokenAddress(symbol as TokenSymbol);
-          const provider = ethereum.getProvider(network);
-          const abi = await loadAbi('ETokenABI');
-          const contract = new ethers.Contract(address, abi, provider);
-          
-          // Get supply rate
-          const supplyRate = await contract.supplyRatePerBlock();
-          const formattedSupplyRate = ethers.formatUnits(supplyRate, 18);
-          
-          // Get borrow rate
-          const borrowRate = await contract.borrowRatePerBlock();
-          const formattedBorrowRate = ethers.formatUnits(borrowRate, 18);
-          
-          // Get liquidity
-          const cash = await contract.getCash();
-          const formattedCash = ethers.formatUnits(cash, 18);
-          
-          // Calculate APY (simplified)
-          const blocksPerYear = 2102400; // Estimate: ~6500 blocks per day * 365
-          const supplyApy = (Math.pow(1 + parseFloat(formattedSupplyRate), blocksPerYear) - 1) * 100;
-          const borrowApy = (Math.pow(1 + parseFloat(formattedBorrowRate), blocksPerYear) - 1) * 100;
-          
-          opportunities.push({
-            symbol,
-            type: 'EToken',
-            supplyApy: `${supplyApy.toFixed(2)}%`,
-            borrowApy: `${borrowApy.toFixed(2)}%`,
-            liquidity: formattedCash,
-            address
-          });
-        }
-        // For PTokens (collateral)
-        else if (['LUSD', 'aprMON'].includes(symbol)) {
-          const address = getPTokenAddress(symbol as TokenSymbol);
-          const provider = ethereum.getProvider(network);
-          const abi = await loadAbi('PTokenABI');
-          const contract = new ethers.Contract(address, abi, provider);
-          
-          // Get collateral factor
-          const collateralFactor = await contract.collateralFactorMantissa();
-          const formattedCollateralFactor = ethers.formatUnits(collateralFactor, 18);
-          
-          // Get exchange rate
-          const exchangeRate = await contract.exchangeRateCurrent();
-          const formattedExchangeRate = ethers.formatUnits(exchangeRate, 18);
-          
-          opportunities.push({
-            symbol,
-            type: 'PToken',
-            collateralFactor: `${(parseFloat(formattedCollateralFactor) * 100).toFixed(2)}%`,
-            exchangeRate: formattedExchangeRate,
-            address
-          });
-        }
-      } catch (error) {
-        console.error(`Error analyzing token ${symbol}:`, error);
-        // Continue with other tokens if one fails
-      }
-    }
-    
-    return opportunities;
-  } catch (error) {
-    console.error(`Error analyzing lending opportunities:`, error);
-    throw new Error(`Failed to analyze lending opportunities: ${(error as Error).message}`);
-  }
-}
-
-/**
  * Get comprehensive protocol analysis for AI agent decision making
  * @param userAddress User address to analyze
  * @param network Network to connect to
- * @returns Comprehensive analysis of protocol state and user position
+ * @returns Object with taskId and initial status
  */
 export async function getProtocolAnalysis(
   userAddress: string,
   network: string = config.provider.defaultNetwork
 ): Promise<{
-  user: {
-    healthFactor: string;
-    totalCollateralUsd: string;
-    totalBorrowedUsd: string;
-    netWorthUsd: string;
-    averageApy: string;
-    liquidationThreshold: string;
-    positions: Array<{
-      symbol: string;
-      collateralBalance: string;
-      collateralBalanceUsd: string;
-      borrowBalance: string;
-      borrowBalanceUsd: string;
-      utilization: string;
-    }>;
-  };
-  market: {
-    tvl: string;
-    totalBorrows: string;
-    marketUtilization: Record<string, string>;
-    supplyApy: Record<string, string>;
-    borrowApr: Record<string, string>;
-    liquidityRisk: Record<string, string>;
-    volatilityRisk: Record<string, string>;
-  };
-  strategies: {
-    recommended: Array<{
-      name: string;
-      description: string;
-      estimatedApy: string;
-      riskLevel: string;
-      steps: Array<string>;
-    }>;
-    liquidationProtection: {
-      riskLevel: string;
-      recommendedActions: Array<string>;
-      safetyBuffer: string;
-    };
-  };
+  taskId: string;
+  status: string;
+  partial?: {
+    message: string;
+    progress: number;
+  }
 }> {
   try {
-    // Define tokens that have both EToken and PToken variants
-    const collateralTokens = ['USDC', 'WBTC', 'LUSD', 'aprMON'];
+    // Create a unique task ID
+    const taskId = `analysis-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
     
-    // Define tokens that have EToken variants (for borrowing)
-    const borrowTokens = ['SWETH', 'USDC', 'WBTC', 'aUSD'];
+    // Start the analysis in the background
+    processProtocolAnalysis(taskId, userAddress, network);
     
-    // Tokens used for market analysis (combining both sets)
-    const marketTokens = Array.from(new Set([...collateralTokens, ...borrowTokens]));
+    // Return immediately with the task ID
+    return {
+      taskId,
+      status: "pending",
+      partial: {
+        message: "Analysis started. Processing user position data...",
+        progress: 5
+      }
+    };
+  } catch (error) {
+    console.error("Error initiating protocol analysis:", error);
+    throw new Error(`Failed to initiate protocol analysis: ${(error as Error).message}`);
+  }
+}
+
+/**
+ * Process protocol analysis task in the background
+ * @param taskId Task ID for tracking
+ * @param userAddress User address to analyze
+ * @param network Network to connect to
+ */
+async function processProtocolAnalysis(
+  taskId: string,
+  userAddress: string,
+  network: string
+): Promise<void> {
+  // Set initial task status
+  transactionQueue.updateTaskStatus(taskId, {
+    status: "processing",
+    message: "Retrieving user position data...",
+    progress: 10,
+    result: null
+  });
+  
+  try {
+    // Define tokens that have both EToken and PToken variants for market analysis
+    const marketTokens = ['SWETH', 'USDC', 'WBTC', 'aUSD', 'LUSD', 'aprMON'];
     
-    // Get user positions
+    // Update status
+    transactionQueue.updateTaskStatus(taskId, {
+      status: "processing",
+      message: "Retrieving user position data...",
+      progress: 15,
+      result: null
+    });
+    
+    // Get user position using the existing getUserPosition function which already works
+    const userPositionData = await getUserPosition(userAddress, network);
+    
+    // Update status
+    transactionQueue.updateTaskStatus(taskId, {
+      status: "processing",
+      message: "Processing user balances...",
+      progress: 30,
+      result: null
+    });
+    
+    // Format user positions from the user position data
     const userPositions = [];
-    let totalCollateralUsd = 0;
-    let totalBorrowedUsd = 0;
+    let totalCollateralUsd = userPositionData.totalCollateralValueUSD;
+    let totalBorrowedUsd = userPositionData.totalBorrowedValueUSD;
     
-    // Get user position data using existing functions
-    for (const token of marketTokens) {
-      try {
-        let collateralBalance = "0";
-        let borrowBalance = "0";
-        
-        // Only try to get collateral for tokens that have PTokens available
-        if (token === 'USDC' || token === 'WBTC' || token === 'LUSD' || token === 'aprMON') {
-          try {
-            const collateralData = await getCollateralBalance(token, userAddress, network);
-            collateralBalance = collateralData.underlyingBalance;
-          } catch (error) {
-            console.warn(`Error getting collateral for ${token}:`, error);
-            // Continue with zero collateral balance
-          }
-        } else {
-          console.log(`Skipping collateral check for ${token}: No PToken available`);
-        }
-        
-        try {
-          const borrowData = await getBorrowBalance(token, userAddress, network);
-          borrowBalance = borrowData.borrowed;
-        } catch (error) {
-          console.warn(`Error getting borrow balance for ${token}:`, error);
-          // Continue with zero borrow balance
-        }
-        
-        // Get token price from our existing function
-        const price = await getPriceForToken(token, network);
-        
-        // Calculate USD values
-        const collateralBalanceUsd = (parseFloat(collateralBalance) * parseFloat(price)).toString();
-        const borrowBalanceUsd = (parseFloat(borrowBalance) * parseFloat(price)).toString();
-        
-        // Calculate utilization
-        const utilization = parseFloat(borrowBalance) > 0 && parseFloat(collateralBalance) > 0
-          ? (parseFloat(borrowBalance) / parseFloat(collateralBalance)).toString()
-          : "0";
-        
-        // Add to totals
-        totalCollateralUsd += parseFloat(collateralBalanceUsd);
-        totalBorrowedUsd += parseFloat(borrowBalanceUsd);
-        
-        // Add position
-        if (parseFloat(collateralBalance) > 0 || parseFloat(borrowBalance) > 0) {
-          userPositions.push({
-            symbol: token,
-            collateralBalance,
-            collateralBalanceUsd,
-            borrowBalance,
-            borrowBalanceUsd,
-            utilization
-          });
-        }
-      } catch (error) {
-        console.warn(`Error processing position for ${token}:`, error);
-        // Continue with next token
+    // Add universal balance to total collateral (these are already deposited into the protocol)
+    totalCollateralUsd += userPositionData.totalUniversalBalanceUSD;
+    
+    // Create a map of token data from user's position
+    const tokenMap = new Map();
+    
+    // Process universal balances
+    for (const balance of userPositionData.universalBalances) {
+      const token = balance.token;
+      if (!tokenMap.has(token)) {
+        tokenMap.set(token, {
+          symbol: token,
+          collateralBalance: "0",
+          collateralBalanceUsd: "0",
+          borrowBalance: "0",
+          borrowBalanceUsd: "0",
+          totalBalance: balance.totalBalance,
+          totalBalanceUsd: balance.totalBalance // Will multiply by price later
+        });
+      } else {
+        const existing = tokenMap.get(token);
+        existing.totalBalance = balance.totalBalance;
+        existing.totalBalanceUsd = balance.totalBalance; // Will multiply by price later
       }
     }
+    
+    // Process collateral
+    for (const collateral of userPositionData.collateral) {
+      const token = collateral.token;
+      if (!tokenMap.has(token)) {
+        tokenMap.set(token, {
+          symbol: token,
+          collateralBalance: collateral.amountUnderlying,
+          collateralBalanceUsd: collateral.amountUnderlying, // Will multiply by price later
+          borrowBalance: "0",
+          borrowBalanceUsd: "0",
+          totalBalance: "0",
+          totalBalanceUsd: "0"
+        });
+      } else {
+        const existing = tokenMap.get(token);
+        existing.collateralBalance = collateral.amountUnderlying;
+        existing.collateralBalanceUsd = collateral.amountUnderlying; // Will multiply by price later
+      }
+    }
+    
+    // Update status
+    transactionQueue.updateTaskStatus(taskId, {
+      status: "processing",
+      message: "Processing borrowing data...",
+      progress: 40,
+      result: null
+    });
+    
+    // Process borrowed
+    for (const borrowed of userPositionData.borrowed) {
+      const token = borrowed.token;
+      if (!tokenMap.has(token)) {
+        tokenMap.set(token, {
+          symbol: token,
+          collateralBalance: "0",
+          collateralBalanceUsd: "0",
+          borrowBalance: borrowed.amount,
+          borrowBalanceUsd: borrowed.amount, // Will multiply by price later
+          totalBalance: "0",
+          totalBalanceUsd: "0"
+        });
+      } else {
+        const existing = tokenMap.get(token);
+        existing.borrowBalance = borrowed.amount;
+        existing.borrowBalanceUsd = borrowed.amount; // Will multiply by price later
+      }
+    }
+    
+    // Process supplied (as additional collateral)
+    for (const supplied of userPositionData.supplied) {
+      const token = supplied.token;
+      if (!tokenMap.has(token)) {
+        tokenMap.set(token, {
+          symbol: token,
+          collateralBalance: supplied.amountUnderlying,
+          collateralBalanceUsd: supplied.amountUnderlying, // Will multiply by price later
+          borrowBalance: "0",
+          borrowBalanceUsd: "0",
+          totalBalance: "0",
+          totalBalanceUsd: "0"
+        });
+      } else {
+        const existing = tokenMap.get(token);
+        // Add to existing collateral balance
+        const currentCollateral = parseFloat(existing.collateralBalance) || 0;
+        const additionalCollateral = parseFloat(supplied.amountUnderlying) || 0;
+        existing.collateralBalance = (currentCollateral + additionalCollateral).toString();
+        existing.collateralBalanceUsd = existing.collateralBalance; // Will multiply by price later
+      }
+    }
+    
+    // Update status
+    transactionQueue.updateTaskStatus(taskId, {
+      status: "processing",
+      message: "Retrieving market data...",
+      progress: 50,
+      result: null
+    });
     
     // Get market data using existing functions
     const marketUtilization: Record<string, string> = {};
@@ -1046,15 +1500,58 @@ export async function getProtocolAnalysis(
     let totalTvl = 0;
     let totalBorrows = 0;
     
-    // Get market data for each token
+    // Get market data and apply prices to user positions
+    let tokenProcessed = 0;
     for (const token of marketTokens) {
       try {
-        // Get interest rates for this token using our existing function
-        const interestRates = await getInterestRates(token, network);
-        supplyApy[token] = interestRates.supplyApy;
-        borrowApr[token] = interestRates.borrowApr;
+        // Update progress based on token processing
+        tokenProcessed++;
+        const progressValue = 50 + Math.floor((tokenProcessed / marketTokens.length) * 30);
         
-        // Get liquidity data using our existing function
+        transactionQueue.updateTaskStatus(taskId, {
+          status: "processing",
+          message: `Processing token ${token} (${tokenProcessed}/${marketTokens.length})...`,
+          progress: progressValue,
+          result: null
+        });
+        
+        // Get price for token
+        const price = await getPriceForToken(token, network);
+        
+        // Apply price to user positions if they exist for this token
+        if (tokenMap.has(token)) {
+          const position = tokenMap.get(token);
+          position.collateralBalanceUsd = (parseFloat(position.collateralBalance) * parseFloat(price)).toString();
+          position.borrowBalanceUsd = (parseFloat(position.borrowBalance) * parseFloat(price)).toString();
+          position.totalBalanceUsd = (parseFloat(position.totalBalance) * parseFloat(price)).toString();
+          
+          // Calculate utilization for this position
+          const collateralValue = parseFloat(position.collateralBalance) + parseFloat(position.totalBalance);
+          const borrowValue = parseFloat(position.borrowBalance);
+          
+          position.utilization = collateralValue > 0 && borrowValue > 0
+            ? `${((borrowValue / collateralValue) * 100).toFixed(2)}%`
+            : "0%";
+            
+          // Add to user positions array if user has any balance
+          if (collateralValue > 0 || borrowValue > 0) {
+            userPositions.push({
+              symbol: token,
+              collateralBalance: (parseFloat(position.collateralBalance) + parseFloat(position.totalBalance)).toString(),
+              collateralBalanceUsd: (parseFloat(position.collateralBalanceUsd) + parseFloat(position.totalBalanceUsd)).toString(),
+              borrowBalance: position.borrowBalance,
+              borrowBalanceUsd: position.borrowBalanceUsd,
+              utilization: position.utilization
+            });
+          }
+        }
+        
+        // Get interest rates for this token
+        const interestRates = await getInterestRates(token, network);
+        supplyApy[token] = interestRates.supplyAPY || "0%";
+        borrowApr[token] = interestRates.borrowAPY || "0%";
+        
+        // Get liquidity data
         const liquidity = await getMarketLiquidity(token, network);
         const tokenTvl = parseFloat(liquidity.totalSupply);
         const tokenBorrows = parseFloat(liquidity.totalBorrows);
@@ -1064,16 +1561,16 @@ export async function getProtocolAnalysis(
         
         // Calculate utilization
         const utilization = tokenTvl > 0 
-          ? (tokenBorrows / tokenTvl).toString() 
-          : "0";
-        marketUtilization[token] = utilization;
+          ? (tokenBorrows / tokenTvl) 
+          : 0;
+        // Format utilization as percentage for display
+        marketUtilization[token] = `${(utilization * 100).toFixed(2)}%`;
         
         // Assess risk levels based on utilization and volatility
         // Liquidity risk based on utilization
-        const utilRate = parseFloat(utilization);
-        if (utilRate > 0.8) {
+        if (utilization > 0.8) {
           liquidityRisk[token] = "high";
-        } else if (utilRate > 0.6) {
+        } else if (utilization > 0.6) {
           liquidityRisk[token] = "medium";
         } else {
           liquidityRisk[token] = "low";
@@ -1088,21 +1585,34 @@ export async function getProtocolAnalysis(
           volatilityRisk[token] = "low"; // Stablecoins
         }
       } catch (error) {
-        console.warn(`Error getting market data for ${token}:`, error);
+        console.error(`Error getting market data for ${token}:`, error);
         // Set defaults if there's an error
-        supplyApy[token] = "0";
-        borrowApr[token] = "0";
-        marketUtilization[token] = "0";
+        supplyApy[token] = "0%";
+        borrowApr[token] = "0%";
+        marketUtilization[token] = "0%";
         liquidityRisk[token] = "medium";
         volatilityRisk[token] = "medium";
       }
     }
     
-    // Calculate health factor
-    const liquidationThreshold = "0.75"; // Default, should be obtained from protocol
-    const healthFactor = totalBorrowedUsd > 0
-      ? ((totalCollateralUsd * parseFloat(liquidationThreshold)) / totalBorrowedUsd).toString()
-      : "∞"; // Infinity if no borrows
+    // Update status
+    transactionQueue.updateTaskStatus(taskId, {
+      status: "processing",
+      message: "Calculating metrics and strategies...",
+      progress: 85,
+      result: null
+    });
+    
+    // Use health factor from user position if available, or calculate it
+    let healthFactor;
+    if (userPositionData.healthFactor !== null) {
+      healthFactor = userPositionData.healthFactor.toString();
+    } else if (totalBorrowedUsd > 0) {
+      const liquidationThreshold = 0.75; // Default value
+      healthFactor = ((totalCollateralUsd * liquidationThreshold) / totalBorrowedUsd).toString();
+    } else {
+      healthFactor = "∞"; // No borrows, so no liquidation risk
+    }
     
     // Calculate net worth
     const netWorthUsd = (totalCollateralUsd - totalBorrowedUsd).toString();
@@ -1112,7 +1622,8 @@ export async function getProtocolAnalysis(
     let totalCollateralWeight = 0;
     
     for (const position of userPositions) {
-      if (parseFloat(position.collateralBalance) > 0) {
+      const collateralValue = parseFloat(position.collateralBalance);
+      if (collateralValue > 0) {
         const tokenApy = parseFloat(supplyApy[position.symbol] || "0");
         const weight = parseFloat(position.collateralBalanceUsd);
         weightedApySum += tokenApy * weight;
@@ -1137,7 +1648,7 @@ export async function getProtocolAnalysis(
       strategies.push({
         name: "Stablecoin Yield Optimizer",
         description: `Deposit ${bestStablecoin} into lending pool to earn optimal yield with minimum risk`,
-        estimatedApy: supplyApy[bestStablecoin] || "0",
+        estimatedApy: supplyApy[bestStablecoin] || "0%",
         riskLevel: "low",
         steps: [
           `Deposit ${bestStablecoin} to earn ${supplyApy[bestStablecoin]}% APY`,
@@ -1235,14 +1746,16 @@ export async function getProtocolAnalysis(
       }
     };
     
-    return {
+    // Assemble the final result
+    const result = {
       user: {
+        address: userAddress,
         healthFactor,
         totalCollateralUsd: totalCollateralUsd.toString(),
         totalBorrowedUsd: totalBorrowedUsd.toString(),
         netWorthUsd,
         averageApy,
-        liquidationThreshold,
+        liquidationThreshold: "0.75", // Default value
         positions: userPositions
       },
       market: {
@@ -1259,10 +1772,38 @@ export async function getProtocolAnalysis(
         liquidationProtection: getLiquidationProtection(healthFactor)
       }
     };
+    
+    // Mark task as completed with the final result
+    transactionQueue.updateTaskStatus(taskId, {
+      status: "completed",
+      message: "Protocol analysis completed successfully",
+      progress: 100,
+      result
+    });
   } catch (error) {
     console.error("Error in protocol analysis:", error);
-    throw new Error(`Failed to analyze protocol: ${(error as Error).message}`);
+    // Mark task as failed
+    transactionQueue.updateTaskStatus(taskId, {
+      status: "failed",
+      message: `Analysis failed: ${(error as Error).message}`,
+      progress: 0,
+      result: null
+    });
   }
+}
+
+/**
+ * Get the status of a protocol analysis task
+ * @param taskId Task ID to check
+ * @returns Current status of the analysis task
+ */
+export function getProtocolAnalysisStatus(taskId: string): {
+  status: string;
+  message: string;
+  progress: number;
+  result: any;
+} {
+  return transactionQueue.getTaskStatus(taskId);
 }
 
 /**

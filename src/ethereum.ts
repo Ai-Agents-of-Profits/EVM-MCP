@@ -1,5 +1,8 @@
 //@ts-nocheck
 import { ethers } from 'ethers';
+import * as fs from 'fs-extra';
+import * as path from 'path';
+import { TOKEN_ADDRESSES } from './constants.js';
 import config, { getRpcUrl, getExplorerUrl, NetworkName } from './config.js';
 import * as crypto from './crypto.js';
 
@@ -32,9 +35,58 @@ export async function checkBalance(
   address: string,
   network: string = config.provider.defaultNetwork
 ): Promise<string> {
-  const provider = getProvider(network);
+  const provider = await getProvider(network);
   const balance = await provider.getBalance(address);
   return ethers.formatEther(balance);
+}
+
+/**
+ * Check balances of ETH and other tokens for an address
+ */
+export async function checkAllBalances(
+  address: string,
+  network: string = config.provider.defaultNetwork
+): Promise<{
+  eth: string;
+  usdc: string;
+  usdt: string;
+  [key: string]: string;
+}> {
+  const provider = await getProvider(network);
+  
+  // Get ETH balance
+  const ethBalance = await provider.getBalance(address);
+  
+  // Create basic ERC20 ABI for token balance checks
+  const erc20Abi = [
+    "function balanceOf(address) view returns (uint256)",
+    "function decimals() view returns (uint8)"
+  ];
+  
+  // Define tokens to check with their addresses
+  const tokens = {
+    usdc: TOKEN_ADDRESSES['Token-USDC'],
+    usdt: '0x88b8E2161DEDC77EF4ab7585569D2415a1C1055D'
+  };
+  
+  // Get token balances
+  const result: { [key: string]: string } = {
+    eth: ethers.formatEther(ethBalance)
+  };
+  
+  for (const [symbol, tokenAddress] of Object.entries(tokens)) {
+    try {
+      const tokenContract = new ethers.Contract(tokenAddress, erc20Abi, provider);
+      const balance = await tokenContract.balanceOf(address);
+      const decimals = await tokenContract.decimals();
+      result[symbol] = ethers.formatUnits(balance, decimals);
+    } catch (error) {
+      console.warn(`Error getting ${symbol} balance:`, error);
+      result[symbol] = '0';
+    }
+  }
+  
+  return result;
 }
 
 /**

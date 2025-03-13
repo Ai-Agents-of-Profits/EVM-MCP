@@ -74,6 +74,13 @@ export function getTokenAddress(symbol: TokenSymbol): string {
 }
 
 /**
+ * Get universal balance contract address
+ */
+export function getUniversalBalanceAddress(): string {
+  return TOKEN_ADDRESSES['usdcUniBalance'];
+}
+
+/**
  * Function to get contract address based on contract type and symbol
  */
 export function getContractAddress(contractType: ContractType, symbol: TokenSymbol): string {

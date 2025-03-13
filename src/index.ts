@@ -13,13 +13,39 @@ import * as ethereum from './ethereum.js';
 import * as protocol from './protocol.js';
 import { TokenSymbol } from './constants.js';
 import config from './config.js';
+import transactionQueue from './transaction-queue.js';
 
 // Helper for handling errors consistently
 function handleError(error: any, defaultMessage: string = "An error occurred") {
   console.error(defaultMessage, error);
+  const errorMessage = `${defaultMessage}: ${error.message || JSON.stringify(error)}`;
   return {
-    error: true,
-    message: `${defaultMessage}: ${error.message || JSON.stringify(error)}`
+    content: [{
+      type: "text",
+      text: JSON.stringify({
+        success: false,
+        error: true,
+        message: errorMessage,
+        details: error.code ? { code: error.code, reason: error.reason } : undefined
+      })
+    }],
+    isError: true
+  };
+}
+
+// Helper for handling successful transactions consistently
+function handleSuccess(data: any, message: string) {
+  console.log(message, data);
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({
+        success: true,
+        message: message,
+        data: data,
+        timestamp: new Date().toISOString()
+      })
+    }]
   };
 }
 
@@ -73,6 +99,25 @@ const CHECK_BALANCE_TOOL: Tool = {
         description: 'Network name (e.g. mainnet, goerli, sepolia)'
       }
     }
+  },
+};
+
+const CHECK_ALL_BALANCES_TOOL: Tool = {
+  name: 'check-all-balances',
+  description: 'Check all token balances of a wallet',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      address: {
+        type: 'string',
+        description: 'The wallet address to check'
+      },
+      network: {
+        type: 'string',
+        description: 'Network name (e.g. mainnet, goerli, sepolia)'
+      }
+    },
+    required: ['address'],
   },
 };
 
@@ -332,73 +377,22 @@ const REDEEM_COLLATERAL_TOOL: Tool = {
   },
 };
 
-const GET_LENDING_BALANCE_TOOL: Tool = {
-  name: 'get-lending-balance',
-  description: 'Get lending balance for a specific token',
+const GET_PROTOCOL_ANALYSIS_TOOL: Tool = {
+  name: 'get-protocol-analysis',
+  description: 'Get comprehensive protocol analysis for AI agent decision making (e.g., smart order execution, liquidation protections, strategy triggers, automated yield optimization, leveraged strategies, position management, automated rebalancing)',
   inputSchema: {
     type: 'object',
     properties: {
       address: {
         type: 'string',
-        description: 'The wallet address to check'
-      },
-      token: {
-        type: 'string',
-        description: 'Token symbol (e.g. ETH, USDC)'
+        description: 'The wallet address to analyze (optional, will use default wallet if not provided)'
       },
       network: {
         type: 'string',
         description: 'Network name (e.g. mainnet, goerli, sepolia)'
       }
-    },
-    required: ['address', 'token'],
-  },
-};
-
-const GET_COLLATERAL_BALANCE_TOOL: Tool = {
-  name: 'get-collateral-balance',
-  description: 'Get collateral balance for a specific token',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      address: {
-        type: 'string',
-        description: 'The wallet address to check'
-      },
-      token: {
-        type: 'string',
-        description: 'Token symbol (e.g. ETH, USDC)'
-      },
-      network: {
-        type: 'string',
-        description: 'Network name (e.g. mainnet, goerli, sepolia)'
-      }
-    },
-    required: ['address', 'token'],
-  },
-};
-
-const GET_BORROW_BALANCE_TOOL: Tool = {
-  name: 'get-borrow-balance',
-  description: 'Get borrow balance for a specific token',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      address: {
-        type: 'string',
-        description: 'The wallet address to check'
-      },
-      token: {
-        type: 'string',
-        description: 'Token symbol (e.g. ETH, USDC)'
-      },
-      network: {
-        type: 'string',
-        description: 'Network name (e.g. mainnet, goerli, sepolia)'
-      }
-    },
-    required: ['address', 'token'],
-  },
+    }
+  }
 };
 
 const GET_USER_POSITION_TOOL: Tool = {
@@ -417,43 +411,6 @@ const GET_USER_POSITION_TOOL: Tool = {
       }
     },
     required: ['address'],
-  },
-};
-
-const ANALYZE_LENDING_TOOL: Tool = {
-  name: 'analyze-lending',
-  description: 'Analyze lending opportunities and APY across protocols',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      address: {
-        type: 'string',
-        description: 'User address to analyze specific opportunities for'
-      },
-      network: {
-        type: 'string',
-        description: 'Network name (e.g. mainnet, goerli, sepolia)'
-      }
-    },
-  },
-};
-
-const GET_INTEREST_RATES_TOOL: Tool = {
-  name: 'get-interest-rates',
-  description: 'Get current interest rates for a specific token',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      token: {
-        type: 'string',
-        description: 'Token symbol (e.g. ETH, USDC)'
-      },
-      network: {
-        type: 'string',
-        description: 'Network name (e.g. mainnet, goerli, sepolia)'
-      }
-    },
-    required: ['token'],
   },
 };
 
@@ -476,25 +433,40 @@ const GET_MARKET_LIQUIDITY_TOOL: Tool = {
   },
 };
 
-const GET_PROTOCOL_ANALYSIS_TOOL: Tool = {
-  name: 'get-protocol-analysis',
-  description: 'Get comprehensive protocol analysis for AI agent decision making (e.g., smart order execution, liquidation protections, strategy triggers, automated yield optimization, leveraged strategies, position management, automated rebalancing)',
+const GET_MARKET_LIQUIDITY_STATUS_TOOL: Tool = {
+  name: 'get-market-liquidity-status',
+  description: 'Get the status of a market liquidity task',
   inputSchema: {
     type: 'object',
     properties: {
-      address: {
+      taskId: {
         type: 'string',
-        description: 'The wallet address to analyze (optional, will use default wallet if not provided)'
+        description: 'The ID of the market liquidity task'
+      }
+    },
+    required: ['taskId'],
+  },
+};
+
+const GET_INTEREST_RATES_TOOL: Tool = {
+  name: 'get-interest-rates',
+  description: 'Get current interest rates for a specific token',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      token: {
+        type: 'string',
+        description: 'Token symbol (e.g. ETH, USDC)'
       },
       network: {
         type: 'string',
         description: 'Network name (e.g. mainnet, goerli, sepolia)'
       }
-    }
-  }
+    },
+    required: ['token'],
+  },
 };
 
-// Define a new tool for checking token approvals
 const CHECK_TOKEN_APPROVAL_TOOL: Tool = {
   name: 'check-token-approval',
   description: 'Check how much of a token is approved for spending by the protocol',
@@ -518,7 +490,6 @@ const CHECK_TOKEN_APPROVAL_TOOL: Tool = {
   },
 };
 
-// Define a new tool for token approval
 const APPROVE_TOKEN_TOOL: Tool = {
   name: 'approve-token',
   description: 'Approve a token for spending by the protocol',
@@ -546,12 +517,58 @@ const APPROVE_TOKEN_TOOL: Tool = {
   },
 };
 
+const CHECK_TRANSACTION_STATUS_TOOL: Tool = {
+  name: 'check-transaction-status',
+  description: 'Check the status of a previously submitted transaction',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      transactionId: {
+        type: 'string',
+        description: 'Transaction ID to check'
+      }
+    },
+    required: ['transactionId'],
+  },
+};
+
+const GET_PROTOCOL_ANALYSIS_STATUS_TOOL: Tool = {
+  name: 'get-protocol-analysis-status',
+  description: 'Get the status of a protocol analysis task',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      taskId: {
+        type: 'string',
+        description: 'The ID of the protocol analysis task'
+      }
+    },
+    required: ['taskId'],
+  },
+};
+
+const GET_USER_POSITION_STATUS_TOOL: Tool = {
+  name: 'get-user-position-status',
+  description: 'Get the status of a user position task',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      taskId: {
+        type: 'string',
+        description: 'The ID of the user position task'
+      }
+    },
+    required: ['taskId'],
+  },
+};
+
 // Create an array of all tools
 const ALL_TOOLS = [
   CREATE_WALLET_TOOL,
   IMPORT_WALLET_TOOL,
   LIST_WALLETS_TOOL,
   CHECK_BALANCE_TOOL,
+  CHECK_ALL_BALANCES_TOOL,
   GET_TRANSACTIONS_TOOL,
   SEND_TRANSACTION_TOOL,
   CALL_CONTRACT_TOOL,
@@ -561,16 +578,16 @@ const ALL_TOOLS = [
   BORROW_FUNDS_TOOL,
   REPAY_BORROWED_TOOL,
   REDEEM_COLLATERAL_TOOL,
-  GET_LENDING_BALANCE_TOOL,
-  GET_BORROW_BALANCE_TOOL,
-  GET_COLLATERAL_BALANCE_TOOL,
-  ANALYZE_LENDING_TOOL,
   GET_PROTOCOL_ANALYSIS_TOOL,
   GET_USER_POSITION_TOOL,
+  GET_USER_POSITION_STATUS_TOOL,
   GET_MARKET_LIQUIDITY_TOOL,
+  GET_MARKET_LIQUIDITY_STATUS_TOOL,
   GET_INTEREST_RATES_TOOL,
   CHECK_TOKEN_APPROVAL_TOOL,
-  APPROVE_TOKEN_TOOL
+  APPROVE_TOKEN_TOOL,
+  CHECK_TRANSACTION_STATUS_TOOL,
+  GET_PROTOCOL_ANALYSIS_STATUS_TOOL
 ];
 
 // Define interface types for the tool handlers
@@ -584,6 +601,11 @@ interface ListWalletsParams {}
 
 interface CheckBalanceParams {
   address?: string;
+  network?: string;
+}
+
+interface CheckAllBalancesParams {
+  address: string;
   network?: string;
 }
 
@@ -653,47 +675,13 @@ interface RedeemCollateralParams {
   network?: string;
 }
 
-interface GetLendingBalanceParams {
-  address: string;
-  token: string;
-  network?: string;
-}
-
-interface GetCollateralBalanceParams {
-  address: string;
-  token: string;
-  network?: string;
-}
-
-interface GetBorrowBalanceParams {
-  address: string;
-  token: string;
-  network?: string;
-}
-
-interface AnalyzeLendingParams {
-  address?: string;
-  network?: string;
-}
-
-interface GetInterestRatesParams {
-  token: string;
-  network?: string;
-}
-
-interface GetMarketLiquidityParams {
-  token: string;
-  network?: string;
-}
-
-interface GetUserPositionParams {
-  address: string;
-  network?: string;
-}
-
 interface GetProtocolAnalysisParams {
   address?: string;
   network?: string;
+}
+
+interface GetProtocolAnalysisStatusParams {
+  taskId: string;
 }
 
 interface CheckTokenApprovalParams {
@@ -707,6 +695,33 @@ interface ApproveTokenParams {
   amount: string;
   fromAddress: string;
   network?: string;
+}
+
+interface CheckTransactionStatusParams {
+  transactionId: string;
+}
+
+interface GetUserPositionParams {
+  address: string;
+  network?: string;
+}
+
+interface GetInterestRatesParams {
+  token: string;
+  network?: string;
+}
+
+interface GetMarketLiquidityParams {
+  token: string;
+  network?: string;
+}
+
+interface GetMarketLiquidityStatusParams {
+  taskId: string;
+}
+
+interface GetUserPositionStatusParams {
+  taskId: string;
 }
 
 // Helper function to extract the base token symbol from token strings like "EToken-WBTC"
@@ -727,7 +742,16 @@ const server = new Server(
   },
   {
     capabilities: {
-      tools: {},
+      tools: {
+        schema: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+            arguments: { type: "object" }
+          },
+          required: ["name"]
+        }
+      },
     },
   },
 );
@@ -750,25 +774,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         try {
           const wallet = await crypto.createWallet();
           await crypto.saveWallet(wallet);
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                address: wallet.address,
-                privateKey: wallet.privateKey,
-                mnemonic: wallet.mnemonic?.phrase
-              }, null, 2)
-            }],
-            isError: false,
-          };
+          return handleSuccess({
+            address: wallet.address,
+            privateKey: wallet.privateKey,
+            mnemonic: wallet.mnemonic?.phrase
+          }, "Wallet created successfully");
         } catch (error: any) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Error creating wallet: ${error.message}`
-            }],
-            isError: true,
-          };
+          return handleError(error, "Error creating wallet");
         }
       }
 
@@ -776,46 +788,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         try {
           const wallet = await crypto.importWallet(args.privateKey);
           await crypto.saveWallet(wallet);
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                address: wallet.address,
-                privateKey: wallet.privateKey,
-                imported: true
-              }, null, 2)
-            }],
-            isError: false,
-          };
+          return handleSuccess({
+            address: wallet.address,
+            privateKey: wallet.privateKey,
+            imported: true
+          }, "Wallet imported successfully");
         } catch (error: any) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Error importing wallet: ${error.message}`
-            }],
-            isError: true,
-          };
+          return handleError(error, "Error importing wallet");
         }
       }
 
       case "list-wallets": {
         try {
           const wallets = await crypto.listWallets();
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify(wallets, null, 2)
-            }],
-            isError: false,
-          };
+          return handleSuccess(wallets, "Wallets listed successfully");
         } catch (error: any) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Error listing wallets: ${error.message}`
-            }],
-            isError: true,
-          };
+          return handleError(error, "Error listing wallets");
         }
       }
 
@@ -828,25 +816,33 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
           
           const balance = await ethereum.checkBalance(address, args.network);
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                address,
-                balance: balance.toString(),
-                network: args.network || 'monad-testnet'
-              }, null, 2)
-            }],
-            isError: false,
-          };
+          return handleSuccess({
+            address,
+            balance: balance.toString(),
+            network: args.network || 'monad-testnet'
+          }, "Balance checked successfully");
         } catch (error: any) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Error checking balance: ${error.message}`
-            }],
-            isError: true,
-          };
+          return handleError(error, "Error checking balance");
+        }
+      }
+
+      case "check-all-balances": {
+        try {
+          const address = args.address;
+          const network = args.network || 'monad-testnet';
+          
+          if (!address) {
+            throw new Error("Address is required");
+          }
+          
+          const balances = await ethereum.checkAllBalances(address, network);
+          return handleSuccess({
+            address,
+            balances,
+            network
+          }, "Token balances checked successfully");
+        } catch (error: any) {
+          return handleError(error, "Error checking token balances");
         }
       }
 
@@ -854,28 +850,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         try {
           const { fromAddress, toAddress, amount, network } = args;
           const result = await ethereum.sendTransaction(fromAddress, toAddress, amount, network);
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                fromAddress,
-                toAddress,
-                amount,
-                transactionHash: result.hash,
-                explorerUrl: result.explorer,
-                network: network || 'monad-testnet'
-              }, null, 2)
-            }],
-            isError: false,
-          };
+          return handleSuccess({
+            fromAddress,
+            toAddress,
+            amount,
+            transactionHash: result.hash,
+            explorerUrl: result.explorer,
+            network: network || 'monad-testnet'
+          }, "Transaction sent successfully");
         } catch (error: any) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Error sending transaction: ${error.message}`
-            }],
-            isError: true,
-          };
+          return handleError(error, "Error sending transaction");
         }
       }
 
@@ -889,26 +873,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
           
           const transactions = await ethereum.getTransactions(walletAddress, limit, network);
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                address: walletAddress,
-                transactions,
-                count: transactions.length,
-                network: network || 'monad-testnet'
-              }, null, 2)
-            }],
-            isError: false,
-          };
+          return handleSuccess({
+            address: walletAddress,
+            transactions,
+            count: transactions.length,
+            network: network || 'monad-testnet'
+          }, "Transactions retrieved successfully");
         } catch (error: any) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Error getting transactions: ${error.message}`
-            }],
-            isError: true,
-          };
+          return handleError(error, "Error getting transactions");
         }
       }
 
@@ -916,15 +888,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { amount, token, fromAddress, network } = args;
         
         if (!amount) {
-          return { error: "Amount is required" };
+          return handleError(new Error("Amount is required"), "Invalid request");
         }
         
         if (!token) {
-          return { error: "Token symbol is required" };
+          return handleError(new Error("Token symbol is required"), "Invalid request");
         }
         
         if (!fromAddress) {
-          return { error: "Sender address is required" };
+          return handleError(new Error("Sender address is required"), "Invalid request");
         }
         
         try {
@@ -943,8 +915,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             console.log(`Token already approved, proceeding with deposit.`);
           }
           
-          // Step 2: Deposit funds using depositFor as per protocol spec
-          const result = await protocol.depositFunds(
+          // Set a strict timeout for the deposit operation
+          const depositPromise = protocol.depositFunds(
             token, 
             String(amount), // Convert amount to string to ensure correct type
             true, // willLend = true for lending deposit
@@ -952,13 +924,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             network
           );
           
-          return {
-            success: true,
-            message: `Successfully deposited ${amount} ${token} to lending pool`,
-            approvalHash: approvalResult.hash !== "0x0" ? approvalResult.hash : "Already approved",
+          // Use Promise.race to prevent timeout
+          const result = await depositPromise;
+          
+          return handleSuccess({
+            amount: amount,
+            token: token,
             txHash: result.hash,
-            explorerUrl: result.explorer
-          };
+            explorerUrl: result.explorer,
+            network: network || 'monad-testnet',
+            transactionId: result.transactionId,
+            message: "Transaction submitted and is being processed in the background. Use check-transaction-status tool with this transactionId to check status. The transaction hash will be available shortly."
+          }, "Deposit request submitted successfully");
         } catch (error) {
           return handleError(error, "Error depositing to lending pool");
         }
@@ -968,19 +945,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { amount, token, fromAddress, network } = args;
         
         if (!amount) {
-          return { error: "Amount is required" };
+          return handleError(new Error("Amount is required"), "Invalid request");
         }
         
         if (!token) {
-          return { error: "Token symbol is required" };
+          return handleError(new Error("Token symbol is required"), "Invalid request");
         }
         
         if (!fromAddress) {
-          return { error: "Sender address is required" };
+          return handleError(new Error("Sender address is required"), "Invalid request");
         }
         
         try {
-          const result = await protocol.withdrawFunds(
+          // Set a strict timeout for the withdrawal operation
+          const withdrawPromise = protocol.withdrawFunds(
             token, 
             amount, 
             true, // forceLentRedemption = true to withdraw from lending pool
@@ -989,13 +967,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             network
           );
           
-          return {
-            success: true,
-            message: `Successfully withdrawn ${result.amountWithdrawn} ${token} from lending pool`,
+          // Use Promise.race to prevent timeout
+          const result = await withdrawPromise;
+          
+          return handleSuccess({
+            amount: amount,
+            token: token,
             txHash: result.hash,
             explorerUrl: result.explorer,
-            lendingBalanceUsed: result.lendingBalanceUsed
-          };
+            lendingBalanceUsed: result.lendingBalanceUsed,
+            network: network || 'monad-testnet',
+            transactionId: result.transactionId,
+            message: "Transaction submitted and is being processed in the background. Use check-transaction-status tool with this transactionId to check status. The transaction hash will be available shortly."
+          }, "Withdrawal request submitted successfully");
         } catch (error) {
           return handleError(error, "Error withdrawing from lending pool");
         }
@@ -1005,15 +989,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { amount, token, fromAddress, network } = args;
         
         if (!amount) {
-          return { error: "Amount is required" };
+          return handleError(new Error("Amount is required"), "Invalid request");
         }
         
         if (!token) {
-          return { error: "Token symbol is required" };
+          return handleError(new Error("Token symbol is required"), "Invalid request");
         }
         
         if (!fromAddress) {
-          return { error: "Sender address is required" };
+          return handleError(new Error("Sender address is required"), "Invalid request");
         }
         
         try {
@@ -1024,12 +1008,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             network
           );
           
-          return {
-            success: true,
-            message: `Successfully borrowed ${amount} ${token}`,
+          return handleSuccess({
+            amount: amount,
+            token: token,
             txHash: result.hash,
-            explorerUrl: result.explorer
-          };
+            explorerUrl: result.explorer,
+            network: network || 'monad-testnet',
+            transactionId: result.transactionId,
+            message: "Transaction submitted and is being processed in the background. Use check-transaction-status tool with this transactionId to check status. The transaction hash will be available shortly."
+          }, "Borrowing funds successful");
         } catch (error) {
           return handleError(error, "Error borrowing funds");
         }
@@ -1040,15 +1027,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const { fromAddress, token, amount, network } = args;
           
           if (!amount) {
-            return { error: "Amount is required" };
+            return handleError(new Error("Amount is required"), "Invalid request");
           }
           
           if (!token) {
-            return { error: "Token symbol is required" };
+            return handleError(new Error("Token symbol is required"), "Invalid request");
           }
           
           if (!fromAddress) {
-            return { error: "Sender address is required" };
+            return handleError(new Error("Sender address is required"), "Invalid request");
           }
           
           const result = await protocol.repayBorrowed(
@@ -1058,12 +1045,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             network
           );
           
-          return {
-            success: true,
-            message: `Successfully repaid ${amount} ${token}`,
+          return handleSuccess({
+            amount: amount,
+            token: token,
             txHash: result.hash,
-            explorerUrl: result.explorer
-          };
+            explorerUrl: result.explorer,
+            network: network || 'monad-testnet',
+            transactionId: result.transactionId,
+            message: "Transaction submitted and is being processed in the background. Use check-transaction-status tool with this transactionId to check status. The transaction hash will be available shortly."
+          }, "Repaying borrowed funds successful");
         } catch (error) {
           return handleError(error, "Error repaying borrowed funds");
         }
@@ -1073,15 +1063,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { amount, token, fromAddress, network } = args;
         
         if (!amount) {
-          return { error: "Amount is required" };
+          return handleError(new Error("Amount is required"), "Invalid request");
         }
         
         if (!token) {
-          return { error: "Token symbol is required" };
+          return handleError(new Error("Token symbol is required"), "Invalid request");
         }
         
         if (!fromAddress) {
-          return { error: "Sender address is required" };
+          return handleError(new Error("Sender address is required"), "Invalid request");
         }
         
         try {
@@ -1094,178 +1084,59 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             network
           );
           
-          return {
-            success: true,
-            message: `Successfully redeemed ${result.assets} ${token} from collateral`,
+          return handleSuccess({
+            amount: amount,
+            token: token,
             txHash: result.hash,
             explorerUrl: result.explorer,
-            assetsRedeemed: result.assets
-          };
+            assetsRedeemed: result.assets,
+            network: network || 'monad-testnet',
+            transactionId: result.transactionId,
+            message: "Transaction submitted and is being processed in the background. Use check-transaction-status tool with this transactionId to check status. The transaction hash will be available shortly."
+          }, "Redeeming collateral successful");
         } catch (error) {
           return handleError(error, "Error redeeming collateral");
         }
       }
 
-      case "get-lending-balance": {
-        try {
-          const { address, token, network } = args;
-          const walletAddress = address || await crypto.getDefaultWalletAddress();
-          
-          if (!walletAddress) {
-            throw new Error("No wallet address provided and no default wallet found");
-          }
-          
-          const baseToken = extractBaseTokenSymbol(token);
-          const balance = await protocol.getLendingBalance(baseToken, walletAddress, network);
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                address: walletAddress,
-                token: token,
-                balance: balance.balance,
-                balanceUsd: balance.balanceUsd,
-                network: network || 'monad-testnet'
-              }, null, 2)
-            }],
-            isError: false,
-          };
-        } catch (error: any) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Error getting lending balance: ${error.message}`
-            }],
-            isError: true,
-          };
-        }
-      }
-
-      case "get-borrow-balance": {
-        try {
-          const { address, token, network } = args;
-          const walletAddress = address || await crypto.getDefaultWalletAddress();
-          
-          if (!walletAddress) {
-            throw new Error("No wallet address provided and no default wallet found");
-          }
-          
-          const baseToken = extractBaseTokenSymbol(token);
-          const borrowData = await protocol.getBorrowBalance(baseToken, walletAddress, network);
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                address: walletAddress,
-                token: token,
-                borrowed: borrowData.borrowed,
-                borrowedUsd: borrowData.borrowedUsd,
-                limit: borrowData.limit,
-                network: network || 'monad-testnet'
-              }, null, 2)
-            }],
-            isError: false,
-          };
-        } catch (error: any) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Error getting borrow balance: ${error.message}`
-            }],
-            isError: true,
-          };
-        }
-      }
-
-      case "get-collateral-balance": {
-        try {
-          const { address, token, network } = args;
-          const walletAddress = address || await crypto.getDefaultWalletAddress();
-          
-          if (!walletAddress) {
-            throw new Error("No wallet address provided and no default wallet found");
-          }
-          
-          const baseToken = extractBaseTokenSymbol(token);
-          const collateralData = await protocol.getCollateralBalance(baseToken, walletAddress, network);
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                address: walletAddress,
-                token: token,
-                tokenBalance: collateralData.tokenBalance,
-                underlyingBalance: collateralData.underlyingBalance,
-                isCollateral: collateralData.isCollateral,
-                network: network || 'monad-testnet'
-              }, null, 2)
-            }],
-            isError: false,
-          };
-        } catch (error: any) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Error getting collateral balance: ${error.message}`
-            }],
-            isError: true,
-          };
-        }
-      }
-
-      case "analyze-lending": {
-        try {
-          const { address, network } = args;
-          const walletAddress = address || await crypto.getDefaultWalletAddress();
-          
-          if (!walletAddress) {
-            throw new Error("No wallet address provided and no default wallet found");
-          }
-          
-          const analyzeResult = await protocol.analyzeLending(walletAddress, network);
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify(analyzeResult, null, 2)
-            }],
-            isError: false,
-          };
-        } catch (error: any) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Error analyzing lending: ${error.message}`
-            }],
-            isError: true,
-          };
-        }
-      }
-      
       case "get-protocol-analysis": {
         try {
           const { address, network } = args;
-          const walletAddress = address || await crypto.getDefaultWalletAddress();
           
-          if (!walletAddress) {
-            throw new Error("No wallet address provided and no default wallet found");
+          if (!address) {
+            return handleError(new Error("Address is required"), "Missing required parameter");
           }
           
-          const analysisResult = await protocol.getProtocolAnalysis(walletAddress, network);
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify(analysisResult, null, 2)
-            }],
-            isError: false,
-          };
+          // Get analysis task
+          const analysisTask = await protocol.getProtocolAnalysis(
+            address,
+            network
+          );
+          
+          return handleSuccess(analysisTask, "Protocol analysis started");
         } catch (error: any) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Error getting protocol analysis: ${error.message}`
-            }],
-            isError: true,
-          };
+          return handleError(error, "Error starting protocol analysis");
+        }
+      }
+
+      case "get-protocol-analysis-status": {
+        try {
+          const { taskId } = args;
+          
+          if (!taskId) {
+            return handleError(new Error("Task ID is required"), "Missing required parameter");
+          }
+          
+          // Get analysis task status
+          const taskStatus = protocol.getProtocolAnalysisStatus(taskId);
+          
+          if (!taskStatus) {
+            return handleError(new Error(`Task with ID ${taskId} not found`), "Task not found");
+          }
+          
+          return handleSuccess(taskStatus, `Protocol analysis status: ${taskStatus.status}`);
+        } catch (error: any) {
+          return handleError(error, "Error checking protocol analysis status");
         }
       }
 
@@ -1274,25 +1145,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const { token, network } = args;
           const baseToken = extractBaseTokenSymbol(token);
           const interestRates = await protocol.getInterestRates(baseToken, network);
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                token: token,
-                interestRates,
-                network: network || 'monad-testnet'
-              }, null, 2)
-            }],
-            isError: false,
-          };
+          return handleSuccess({
+            token: token,
+            interestRates,
+            network: network || 'monad-testnet'
+          }, "Interest rates retrieved successfully");
         } catch (error: any) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Error getting interest rates: ${error.message}`
-            }],
-            isError: true,
-          };
+          return handleError(error, "Error getting interest rates");
         }
       }
 
@@ -1300,29 +1159,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         try {
           const { token, network } = args;
           const baseToken = extractBaseTokenSymbol(token);
-          const liquidityData = await protocol.getMarketLiquidity(baseToken, network);
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                token: token,
-                totalBorrows: liquidityData.totalBorrows,
-                totalSupply: liquidityData.totalSupply,
-                availableLiquidity: liquidityData.availableLiquidity,
-                utilization: liquidityData.utilization,
-                network: network || 'monad-testnet'
-              }, null, 2)
-            }],
-            isError: false,
-          };
+          const result = await protocol.getMarketLiquidityAsync(baseToken, network);
+          return handleSuccess(result, "Market liquidity analysis initiated");
         } catch (error: any) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Error getting market liquidity: ${error.message}`
-            }],
-            isError: true,
-          };
+          return handleError(error, "Error starting market liquidity analysis");
+        }
+      }
+
+      case "get-market-liquidity-status": {
+        try {
+          const { taskId } = args;
+          
+          if (!taskId) {
+            throw new Error("Task ID is required");
+          }
+          
+          const status = protocol.getMarketLiquidityStatus(taskId);
+          
+          if (!status) {
+            throw new Error(`Task with ID ${taskId} not found`);
+          }
+          
+          return handleSuccess(status, `Market liquidity status: ${status.status}`);
+        } catch (error: any) {
+          return handleError(error, "Error getting market liquidity status");
         }
       }
 
@@ -1335,27 +1195,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             throw new Error("No wallet address provided and no default wallet found");
           }
           
-          const positionData = await protocol.getUserPosition(walletAddress, network);
-          
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                address: walletAddress,
-                position: positionData,
-                network: network || 'monad-testnet'
-              }, null, 2)
-            }],
-            isError: false,
-          };
+          // Use the new async function instead of direct call
+          const result = await protocol.getUserPositionAsync(walletAddress, network);
+          return handleSuccess(result, "User position analysis initiated");
         } catch (error: any) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Error getting user position: ${error.message}`
-            }],
-            isError: true,
-          };
+          return handleError(error, "Error starting user position analysis");
+        }
+      }
+
+      case "get-user-position-status": {
+        try {
+          const { taskId } = args;
+          
+          if (!taskId) {
+            throw new Error("Task ID is required");
+          }
+          
+          const status = protocol.getUserPositionStatus(taskId);
+          
+          if (!status) {
+            throw new Error(`Task with ID ${taskId} not found`);
+          }
+          
+          return handleSuccess(status, `User position status: ${status.status}`);
+        } catch (error: any) {
+          return handleError(error, "Error getting user position status");
         }
       }
 
@@ -1364,26 +1228,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const { token, owner, network } = args;
           const baseToken = extractBaseTokenSymbol(token);
           const approvalAmount = await protocol.checkTokenApproval(baseToken, owner, network);
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                token: token,
-                owner: owner,
-                approvalAmount: approvalAmount,
-                network: network || 'monad-testnet'
-              }, null, 2)
-            }],
-            isError: false,
-          };
+          return handleSuccess({
+            token: token,
+            owner: owner,
+            approvalAmount: approvalAmount,
+            network: network || 'monad-testnet'
+          }, "Token approval retrieved successfully");
         } catch (error: any) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Error checking token approval: ${error.message}`
-            }],
-            isError: true,
-          };
+          return handleError(error, "Error checking token approval");
         }
       }
 
@@ -1392,56 +1244,65 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const { token, amount, fromAddress, network } = args;
           const baseToken = extractBaseTokenSymbol(token);
           const result = await protocol.approveToken(baseToken, amount, fromAddress, network);
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                token: token,
-                amount: amount,
-                fromAddress: fromAddress,
-                txHash: result.hash,
-                explorerUrl: result.explorer,
-                network: network || 'monad-testnet'
-              }, null, 2)
-            }],
-            isError: false,
-          };
+          return handleSuccess({
+            token: token,
+            amount: amount,
+            fromAddress: fromAddress,
+            txHash: result.hash,
+            explorerUrl: result.explorer,
+            network: network || 'monad-testnet'
+          }, "Token approval successful");
         } catch (error: any) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Error approving token: ${error.message}`
-            }],
-            isError: true,
-          };
+          return handleError(error, "Error approving token");
+        }
+      }
+
+      case "check-transaction-status": {
+        try {
+          const { transactionId } = args;
+          
+          // Get transaction from queue
+          const transaction = transactionQueue.getTransaction(transactionId);
+          
+          if (!transaction) {
+            return handleError(new Error(`Transaction with ID ${transactionId} not found`), "Transaction not found");
+          }
+          
+          // Return transaction details
+          return handleSuccess({
+            id: transaction.id,
+            type: transaction.type,
+            status: transaction.status,
+            hash: transaction.hash || 'pending',
+            params: transaction.params,
+            createdAt: new Date(transaction.timestamp).toISOString(),
+            timeElapsed: Date.now() - transaction.timestamp + 'ms',
+            error: transaction.error
+          }, `Transaction status: ${transaction.status}`);
+        } catch (error) {
+          return handleError(error, "Error checking transaction status");
         }
       }
 
       // Add other tool handlers here...
 
       default:
-        return {
-          content: [{ type: "text", text: `Unknown tool: ${name}` }],
-          isError: true,
-        };
+        return handleError(new Error(`Unknown tool: ${name}`), "Invalid request");
     }
   } catch (error) {
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-        },
-      ],
-      isError: true,
-    };
+    return handleError(error, "Error processing request");
   }
 });
 
 async function runServer() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("MCP EVM Signer server running on stdio");
+  try {
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    console.error("MCP EVM Signer server running on stdio");
+  } catch (error) {
+    console.error("Failed to start server:", error);
+    process.exit(1);
+  }
 }
 
 runServer().catch((error) => {

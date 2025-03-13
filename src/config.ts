@@ -28,8 +28,8 @@ interface NetworkConfig {
 const networks: Record<NetworkName, NetworkConfig> = {
   monad: {
     name: 'Monad Testnet',
-    rpcUrl: 'https://monad-testnet.g.alchemy.com/v2/lgche08Y3JRVND-hYxhnBMc_aTmJcTTr',
-    alternativeRpcUrl: 'https://testnet-rpc.monad.xyz',
+    rpcUrl: 'https://monad-testnet.g.alchemy.com/v2/QsZfqi1o2pa2hcxXsgq6DXbDI2H-bbBR',
+    alternativeRpcUrl: 'https://monad-testnet.g.alchemy.com/v2/QsZfqi1o2pa2hcxXsgq6DXbDI2H-bbBR',
     chainId: 10143,
     chainIdHex: '0x279F',
     explorer: 'https://testnet.monadexplorer.com/',
@@ -49,7 +49,7 @@ export const config = {
   // API configuration
   provider: {
     type: 'alchemy' as 'alchemy' | 'infura', // 'alchemy' or 'infura'
-    alchemyApiKey: 'lgche08Y3JRVND-hYxhnBMc_aTmJcTTr',
+    alchemyApiKey: 'QsZfqi1o2pa2hcxXsgq6DXbDI2H-bbBR',
     infuraApiKey: process.env.INFURA_API_KEY || '',
     defaultNetwork: 'monad' as NetworkName, // Changed from 'sepolia' to 'monad'
   },
